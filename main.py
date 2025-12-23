@@ -1,14 +1,11 @@
 import streamlit as st
-from google import genai
-from google.genai import types
 from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains import load_qa_chain
 from langchain_core.prompts import PromptTemplate
-import os
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 
 # Page configuration
 st.set_page_config(page_title="RAG Document Q&A", page_icon="📚", layout="wide")
@@ -46,14 +43,21 @@ def create_vector_store(text_chunks, api_key):
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     return vector_store
 
+def format_docs(docs):
+    """Format retrieved documents into a single string"""
+    return "\n\n".join(doc.page_content for doc in docs)
+
 def get_conversational_chain(api_key):
     """Create conversational chain for question answering"""
     prompt_template = """
     Answer the question as detailed as possible from the provided context. 
     If the answer is not in the provided context, say "The answer is not available in the uploaded documents."
     
-    Context:\n{context}\n
-    Question:\n{question}\n
+    Context:
+    {context}
+    
+    Question:
+    {question}
     
     Answer:
     """
@@ -69,14 +73,21 @@ def get_conversational_chain(api_key):
         input_variables=["context", "question"]
     )
     
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
+    # Create the chain using LCEL (LangChain Expression Language)
+    chain = (
+        {"context": lambda x: format_docs(x["docs"]), "question": lambda x: x["question"]}
+        | prompt
+        | model
+        | StrOutputParser()
+    )
+    
     return chain
 
 def process_user_question(user_question, api_key):
     """Process user question and generate response"""
     if st.session_state.vector_store is None:
         st.error("Please upload and process documents first!")
-        return
+        return None
     
     # Retrieve relevant documents
     docs = st.session_state.vector_store.similarity_search(user_question, k=3)
@@ -85,12 +96,9 @@ def process_user_question(user_question, api_key):
     chain = get_conversational_chain(api_key)
     
     # Generate response
-    response = chain(
-        {"input_documents": docs, "question": user_question},
-        return_only_outputs=True
-    )
+    response = chain.invoke({"docs": docs, "question": user_question})
     
-    return response["output_text"]
+    return response
 
 def main():
     st.title("📚 RAG Document Q&A with Google Gemini")
@@ -176,8 +184,9 @@ def main():
                 with st.spinner("Generating answer..."):
                     try:
                         answer = process_user_question(user_question, api_key)
-                        st.session_state.chat_history.append((user_question, answer))
-                        st.rerun()
+                        if answer:
+                            st.session_state.chat_history.append((user_question, answer))
+                            st.rerun()
                     except Exception as e:
                         st.error(f"Error generating answer: {str(e)}")
     
